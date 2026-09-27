@@ -1,0 +1,55 @@
+# The one and only model config. run.sh reads THIS — the boxes themselves live in cluster.env (written by
+# setup.sh on first run, machine-specific, never committed).
+# Flag mapping: `name: value` -> --name value | `name: true` -> --name | `name: false` -> omitted.
+# Cluster flags (--nnodes 2 --node-rank N --master-addr/--master-port --tensor-parallel-size 2 --headless on the
+# worker) and the per-box NCCL/gloo interface pins are added by run.sh from cluster.env — never put them here.
+
+server:
+  image: myllmbox/mimo-v26-flash-cluster-vllm:v1  # pinned public tag, digest sha256:73708971…7401 (README) = vLLM nightly ddd6fbca (2026-09-26)
+                                                # + loader page-cache drop. Release 0.30.0 cannot serve this checkpoint.
+  cpuset: "5-9,15-19"                           # the GB10's 10 Cortex-X925 3.9GHz cores (0-4,10-14 are 2.8GHz A725)
+  model: XiaomiMiMo/MiMo-V2.6-Flash-RL          # HF repo — downloaded into ./models on first run (~178G),
+                                                # then synced to the worker at the SAME absolute path
+  port: 8000                                    # OpenAI API on the head box
+  host: 127.0.0.1                               # 127.0.0.1 keeps the API local; 0.0.0.0 exposes it on the LAN
+  master_port: 25000                            # torch.distributed rendezvous, on the interconnect
+  models_dir: ./models
+  cache_dir: ./cache                            # compile caches (per box); deletable, first boot rebuilds
+
+env:
+  PYTHONUNBUFFERED: "1"
+  TORCH_NCCL_ASYNC_ERROR_HANDLING: "1"
+  TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC: "180"
+  VLLM_MARLIN_USE_ATOMIC_ADD: "1"
+  VLLM_USE_DEEP_GEMM: "0"                       # DeepGEMM fp8/MXFP4 paths are not used on the GB10 here
+  VLLM_MOE_USE_DEEP_GEMM: "0"
+  TORCH_CUDA_ARCH_LIST: "12.1a"
+  FLASHINFER_CUDA_ARCH_LIST: "12.1a"
+  NCCL_IB_GID_INDEX: "3"                        # fallback only — run.sh probes the live index per box
+  NCCL_IB_ROCE_VERSION_NUM: "2"
+  NCCL_IB_ADDR_FAMILY: "AF_INET"
+  NCCL_CROSS_NIC: "1"
+  NCCL_IGNORE_CPU_AFFINITY: "1"
+  NCCL_CUMEM_ENABLE: "0"
+  NCCL_NVLS_ENABLE: "0"
+
+vllm:
+  served-model-name: XiaomiMiMo/MiMo-V2.6-Flash-RL
+  trust-remote-code: true
+  distributed-executor-backend: mp
+  gpu-memory-utilization: 0.70                  # with kv-cache-memory-bytes pinned this does not size the KV pool
+  kv-cache-memory-bytes: "19000000000"          # 19 GB PER BOX ≈ 1.45M pooled KV tokens (bf16)
+  max-model-len: 300000
+  max-num-seqs: 16
+  load-format: safetensors                      # keep: the fast loaders (fastsafetensors, instanttensor) load this
+                                                # checkpoint incorrectly — output is garbage from the first token
+  moe-backend: marlin
+  # drafter — ONE of these two lines active:
+  speculative-config: '{"method":"mtp","num_speculative_tokens":1}'   # MTP (default): balanced, best with thinking on
+  # speculative-config: '{"method":"dflash","model":"/models/MiMo-V2.6-Flash-RL/dflash","num_speculative_tokens":7}'   # DFlash: faster code, slower prose
+  reasoning-parser: mimo
+  enable-auto-tool-choice: true
+  tool-call-parser: mimo
+  default-chat-template-kwargs: '{"enable_thinking":true}'
+  generation-config: vllm                       # the checkpoint's generation_config caps replies at 2048 tokens; keep
+  override-generation-config: '{"temperature":1.0,"top_p":0.95}'
