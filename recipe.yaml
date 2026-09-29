@@ -5,23 +5,25 @@
 # worker) and the per-box NCCL/gloo interface pins are added by run.sh from cluster.env — never put them here.
 
 server:
-  image: myllmbox/mimo-v26-flash-cluster-vllm:v1  # pinned public tag, digest sha256:73708971…7401 (README) = vLLM nightly ddd6fbca (2026-09-26)
-                                                # + loader page-cache drop. Release 0.30.0 cannot serve this checkpoint.
+  image: myllmbox/mimo-v26-flash-cluster-vllm:v2  # pinned public tag, digest sha256:5af49bd0…e726 (README) = vLLM nightly ddd6fbca (2026-09-26)
+                                                # + our loader and kernel choices, prebuilt. v1 (RL checkpoint) = `git checkout v1`
   cpuset: "5-9,15-19"                           # the GB10's 10 Cortex-X925 3.9GHz cores (0-4,10-14 are 2.8GHz A725)
-  model: XiaomiMiMo/MiMo-V2.6-Flash-RL          # HF repo — downloaded into ./models on first run (~178G),
+  model: XiaomiMiMo/MiMo-V2.6-Flash-MOPD        # HF repo — downloaded into ./models on first run (~178G),
                                                 # then synced to the worker at the SAME absolute path
   port: 8000                                    # OpenAI API on the head box
   host: 127.0.0.1                               # 127.0.0.1 keeps the API local; 0.0.0.0 exposes it on the LAN
   master_port: 25000                            # torch.distributed rendezvous, on the interconnect
   models_dir: ./models
   cache_dir: ./cache                            # compile caches (per box); deletable, first boot rebuilds
+  patches: ""                                   # optional vLLM patches from patches/, space-separated (e.g. hermes-chat);
+                                                # default none = the stock image. See patches/README.md
 
 env:
   PYTHONUNBUFFERED: "1"
   TORCH_NCCL_ASYNC_ERROR_HANDLING: "1"
   TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC: "180"
   VLLM_MARLIN_USE_ATOMIC_ADD: "1"
-  VLLM_USE_DEEP_GEMM: "0"                       # DeepGEMM fp8/MXFP4 paths are not used on the GB10 here
+  VLLM_USE_DEEP_GEMM: "0"                       # not used on the GB10
   VLLM_MOE_USE_DEEP_GEMM: "0"
   TORCH_CUDA_ARCH_LIST: "12.1a"
   FLASHINFER_CUDA_ARCH_LIST: "12.1a"
@@ -32,21 +34,23 @@ env:
   NCCL_IGNORE_CPU_AFFINITY: "1"
   NCCL_CUMEM_ENABLE: "0"
   NCCL_NVLS_ENABLE: "0"
+  MBX_MTP_NONCHAIN: "1"                         # each of the 3 trained draft layers reads the target's hidden states
 
 vllm:
-  served-model-name: XiaomiMiMo/MiMo-V2.6-Flash-RL
+  served-model-name: XiaomiMiMo/MiMo-V2.6-Flash-MOPD
   trust-remote-code: true
   distributed-executor-backend: mp
   gpu-memory-utilization: 0.70                  # with kv-cache-memory-bytes pinned this does not size the KV pool
-  kv-cache-memory-bytes: "19000000000"          # 19 GB PER BOX ≈ 1.45M pooled KV tokens (bf16)
+  kv-cache-memory-bytes: "16000000000"          # 16 GB PER BOX ≈ 1.22M pooled KV tokens
   max-model-len: 300000
   max-num-seqs: 16
-  load-format: safetensors                      # keep: the fast loaders (fastsafetensors, instanttensor) load this
-                                                # checkpoint incorrectly — output is garbage from the first token
+  load-format: mbx                              # ours: ~1 min load, prepares into ./cache on the first boot (deletable).
+                                                # `safetensors` = the stock loader (correct, ~16 min, slower serve);
+                                                # never fastsafetensors / instanttensor on this checkpoint (garbage output)
   moe-backend: marlin
-  # drafter — ONE of these two lines active:
-  speculative-config: '{"method":"mtp","num_speculative_tokens":1}'   # MTP (default): balanced, best with thinking on
-  # speculative-config: '{"method":"dflash","model":"/models/MiMo-V2.6-Flash-RL/dflash","num_speculative_tokens":7}'   # DFlash: faster code, slower prose
+  speculative-config: '{"method":"mtp","num_speculative_tokens":3}'   # MTP K=3 on the checkpoint's 3 trained draft layers
+  # speculative-config: '{"method":"mtp","num_speculative_tokens":2}'   # K=2: same average, lower peak, +6 % on long prose
+  # speculative-config: '{"method":"dflash","model":"/models/MiMo-V2.6-Flash-MOPD/dflash","num_speculative_tokens":5}'   # the checkpoint's DFlash drafter: faster code bursts, slower prose
   reasoning-parser: mimo
   enable-auto-tool-choice: true
   tool-call-parser: mimo
