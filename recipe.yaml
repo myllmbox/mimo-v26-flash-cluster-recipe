@@ -11,7 +11,7 @@ server:
   model: XiaomiMiMo/MiMo-V2.6-Flash-MOPD        # HF repo — downloaded into ./models on first run (~178G),
                                                 # then synced to the worker at the SAME absolute path
   port: 8000                                    # OpenAI API on the head box
-  host: 127.0.0.1                               # 127.0.0.1 keeps the API local; 0.0.0.0 exposes it on the LAN
+  host: 0.0.0.0                                 # the API on the LAN (box IP:port); 127.0.0.1 = this box only
   master_port: 25000                            # torch.distributed rendezvous, on the interconnect
   models_dir: ./models
   cache_dir: ./cache                            # compile caches (per box); deletable, first boot rebuilds
